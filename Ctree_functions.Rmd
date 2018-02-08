@@ -1,0 +1,599 @@
+---
+title: "Function Definitions"
+author: "Peter"
+date: "1/29/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+path_main <- "~/t-drive/Clients/Woolworths/2015-12_Sagarmatha/Analytics/Market_Basket_Analysis/"
+
+```
+
+##Purpose
+
+All functions we make and use throughout this analysis will be stored in this script.
+
+# fn_barplot_nr_bask_per_dep
+
+Purpose: function will output a barplot showing for each department, how many baskets contain at least 1 item from that department
+Input: data.frame, 
+Output:ggplot
+
+```{r}
+fn_barplot_nr_bask_per_dep <- function(df) {
+  
+non_zero_variance_columns<-lapply(names(df)[!names(df) == 'trans_id'], function(x) {
+   return(data.frame(name=x,n_nonzero=sum(df[[x]]!= 0)))
+}
+)
+df_non_zero_variance_columns<-do.call('rbind', non_zero_variance_columns)
+df_non_zero_variance_columns$name<-factor(df_non_zero_variance_columns$name,
+                                           levels = df_non_zero_variance_columns$name[order(df_non_zero_variance_columns$n_nonzero)]
+)
+
+df_non_zero_variance_columns%>%ggplot(aes(x=name, y=n_nonzero)) + geom_bar(stat="identity") +
+  ggtitle('n baskets containing an item from given dept')+
+  coord_flip()
+}
+```
+
+#fn_barplot_nr_dep
+
+Purpose: Plot showing the distribution of how many unique departments are included in each basket's contents.
+Input: data.frame
+Output: ggplot & data.frame
+
+
+```{r}
+fn_barplot_nr_dep <- function(df) {
+n_departments<-rowSums(df[,2:ncol(df)] != 0)
+df_n_departments <<- data.frame(trans_id = df$trans_id, n_departments = n_departments)
+ggplot(df_n_departments, aes(x= n_departments)) + geom_bar()+ ggtitle('n departments per basket')
+}
+```
+
+#fn_remove_outliers_over_xperc
+
+Purpose: Remove the top x% outliers for each column (remove weird baskets)
+Input: vec -> column to be cleaned, x -> threshhold value for outliers
+Output: same input column, but with outliers set to NA
+
+```{r}
+
+fn_remove_outliers_over_xperc <- function(vec,x) {
+  the_95_threshold <-
+  vec %>%
+    .[.>0] %>%
+    quantile(prob = seq(0, 1, length = 21), type = 5) %>% .[paste0(x,'%')]
+    
+if(any(the_95_threshold == 0 | is.na(the_95_threshold))){
+  cat("no threshold found \n")
+  return(vec)
+}
+  
+    n_outliers <- 
+      vec %>% .[.>the_95_threshold] %>% length
+      # outliers::outlier(vec,logical = TRUE) %>% sum
+    
+    cat('removed',n_outliers, 'outliers from column \n')
+    cat('The threshold was',the_95_threshold,'\n')
+    
+    # vec[outliers::outlier(vec,logical = TRUE)] <- NA
+    vec[vec>the_95_threshold] <- NA
+    
+    return(vec)
+}
+```
+
+
+#fn_scale_magnitude
+
+Purpose:Scale sparse variables to unit variance using only >0 values
+Input: numeric vector
+Output: numeric vector
+
+```{r}
+#create scaling function
+fn_scale_magnitude<-function(numcol) {
+  scaling_value<-var(numcol[numcol>0])
+  return(numcol/sqrt(scaling_value))
+}
+
+```
+
+
+##Build Cluster Functions
+
+
+#fn_basket_descriptions
+
+Purpose: after running NMF, this function will describe the composition of each new dimension (ie describe the archtype baskets as a function of the component departments)
+Input: dimension-by-dept Array from decomposition (array is called H in NMF output)
+Output: data.frame with useful descriptions
+
+```{r}
+fn_basket_descriptions<-function(basket_dept_array) {
+  cluster_descriptions<-apply(basket_dept_array, MARGIN = 1, function(row) {
+    #remove zero rows:
+    row<-row[row>0]
+    val<-row[order(row, decreasing=T)]
+    return(feature_mag = paste0(gsub("_amt","",names(val))," - ",round(val,2)))
+  })
+    return(t(sapply(cluster_descriptions, '[', seq(max(sapply(cluster_descriptions, length))))))
+}
+
+```
+
+## Fit multiple dimensions nmf wrapper
+
+Purpose: This function allows for running many nmf models and also allows to stop the process mid way. Stores relevant metrics in a list output that we can map over to choose best model and join back to the tidy dataframe.
+Input: 
+Output: list with relevant results one can map over
+
+```{r}
+fn_create_benchmark_nmf <- function(){
+  
+  path <- "~/t-drive/Clients/Woolworths/2015-12_Sagarmatha/Analytics/Market_Basket_Analysis/Plot_output/"
+  Memory <- list()
+  
+  fn_basket_descriptions<-function(basket_dept_array) {
+  cluster_descriptions<-apply(basket_dept_array, MARGIN = 1, function(row) {
+    #remove zero rows:
+    row<-row[row>0]
+    val<-row[order(row, decreasing=T)]
+    return(feature_mag = paste0(gsub("_amt","",names(val))," - ",round(val,2)))
+  })
+    return(t(sapply(cluster_descriptions, '[', seq(max(sapply(cluster_descriptions, length))))))
+  }
+  
+  return(
+    
+    function(df, sample_size = 1000, dimensions = 16,  method = 'scd', loss = 'mkl', rel.tol=1e-9, show = FALSE,  ...){
+              if (show == TRUE) {
+            return(Memory)
+        }
+        else {
+      
+      #should we sample or not
+      if (is.null(sample_size)) {
+        
+      sample_df<-df
+      
+      } else {
+        rows_sampled <- 1:nrow(df) %>% sample(size = sample_size,replace = FALSE)
+        
+      sample_df<-df %>% select(-trans_id) %>% .[rows_sampled,] %>% as.matrix()
+      }
+
+      #run dimensionality reduction
+      system.time(decomp <- nnmf(sample_df, dimensions, rel.tol=rel.tol, method = method, loss = loss))
+      
+      basket_descriptions<-fn_basket_descriptions(decomp$H)
+      
+      jpeg(file= paste0(path,"heatmap_",dimensions,"dim",".jpg"))
+heatmap(decomp$H, Rowv = NA, ylab = 'basket', xlab = 'department', margins = c(2,2),
+        labRow = '', labCol = '', scale = 'row', col = cm.colors(100))
+dev.off()
+
+      results <-  list(list(dimensions = dimensions,
+                       decomp = decomp, 
+                       basket_descriptions = basket_descriptions,
+                       rows_sampled = rows_sampled))
+      
+      Memory <<-
+        Memory %>% append(results) 
+        }
+    }
+
+  )
+}
+
+```
+
+## Extract_node_info function
+
+Purpose: This function returns the data of the ctree model back having labeled the terminal nodes for you in coulumn called `nodeID`  
+Input: ctree model, train_data
+Output: list with relevant results one can map over
+
+```{r}
+fn_extract_tree_info <- function(tree_model, train_data, ...) {
+  if (any(class(tree_model) == "train")) {
+    tree_model <- tree_model$finalModel
+  }
+  
+# tree_model <- 
+#   tree_model$finalModel
+
+#terminal nodes
+terminal_node_positions <- 
+  tree_model %>% 
+  party::where() %>% unique
+
+terminal_nodes <- 
+  tree_model %>%
+  party::nodes(terminal_node_positions)
+
+logical_vec_each_terminal_node <- 
+  terminal_nodes %>% map(~.x['weights'] %>% unlist %>% as.logical)
+
+terminal_node_data <-  map2(logical_vec_each_terminal_node,
+                            terminal_nodes,~train_data[.x,] %>% 
+                            mutate(Node_ID = .y %>% pluck('nodeID')))
+
+tidy_data_terminal_nodes <- 
+  terminal_node_data %>% 
+  bind_rows()
+
+return(tidy_data_terminal_nodes)
+  
+}
+
+```
+
+##Tree manipulation functions:
+
+Purpose: This function will extract all the filters required to get to any node of a ctree2. it will also provide an indicator to show whether that node is a terminal node or not. this output list will be used for later filtering of data
+
+Input: ctree2 object
+Output: list with the following structure -
+each element in the list will represent a node of the tree
+each node will itself be a list with 2 elements: 'is_terminal' is logical indicating whether or not the node is a terminal node, 'filters' is a list of strings representing the filters on the data for an observation to appear in that node.
+
+```{r}
+fn_tree_list<-function(ctree, ...) {
+  #run required function definitions
+  fn_make_node<-function() {
+    return(list(parent = integer, is_terminal = logical, filters= list))
+  }
+  
+  mk_str<-function(psplit, true) {
+    if (true) {
+      return(paste0(psplit$variableName, "<=", psplit$ splitpoint))
+    }
+    else {
+      return(paste0(psplit$variableName, ">", psplit$ splitpoint))
+    }
+  }
+  
+  fn_navigate<-function(parentID, tree, commands){
+    ls.output[[tree$nodeID]]<<-fn_make_node()
+    ls.output[[tree$nodeID]][["parent"]]<<-parentID
+    ls.output[[tree$nodeID]][["is_terminal"]]<<-tree$terminal
+    ls.output[[tree$nodeID]][["filters"]]<<-commands
+    
+ 
+    
+    if (tree$terminal ==F) {
+      cmd_left<-commands
+      cmd_left[[length(cmd_left)+1]]<-mk_str(tree$psplit,T)
+      
+      cmd_right<-commands
+      cmd_right[[length(cmd_right)+1]]<-mk_str(tree$psplit,F)
+      
+      fn_navigate(tree$nodeID, tree[['left']], cmd_left)
+      fn_navigate(tree$nodeID, tree[['right']], cmd_right)
+    }
+    return(NULL)
+  }
+  
+  
+  #initialise variables
+  ls.output<-list()
+  commands<-list()
+  
+  
+  #begin at node 1
+  fn_navigate(0, ctree$finalModel@tree, commands)
+  
+  return(ls.output)
+}
+```
+
+## Extract opportunity from a tree
+
+This uses the summary stats from a tree and then extracts the oppertunities of the tree.
+
+We can then map these chains over many trees to get some oppertunity sets
+
+Define function
+
+  We want to pull from each trees the size difference between neighboring nodes
+
+Pair of functions that add the dplyr filters for nodes to tidy output
+
+Function that extracts the summary info about the trees given the nodes
+
+```{r}
+fn_extract_tree_summary <- function(tidy_terminal_node_data,Y_variable_name, ...) {
+
+  Y_variable_name_enquo <- enquo(Y_variable_name)
+  mean_name <- paste0("mean_", quo_name(Y_variable_name_enquo))
+  median_name <- paste0("median_", quo_name(Y_variable_name_enquo))
+  sum_name <- paste0("sum_", quo_name(Y_variable_name_enquo))
+  
+
+summary_ <-
+  tidy_terminal_node_data %>% 
+  group_by(Node_ID) %>% 
+  summarise(
+           !!sum_name := sum(!!Y_variable_name_enquo, na.rm=TRUE),
+           !!mean_name := mean(!!Y_variable_name_enquo, na.rm=TRUE),
+           !!median_name := median(!!Y_variable_name_enquo, na.rm=TRUE),
+           Inter_QR = summary(!!Y_variable_name_enquo, na.rm=TRUE) %>% lst(),
+           sub_population = n()
+            )
+
+summary_nested <- 
+  tidy_terminal_node_data %>% 
+  # select(Node_ID,everything()) %>% 
+  group_by(Node_ID) %>% 
+  nest()
+  # summarise(sum(avg_period_days))
+  
+summary_joined <- 
+  summary_ %>% 
+  left_join(summary_nested, by = "Node_ID") %>% 
+  select(Node_ID,data,everything())
+
+return(summary_joined)
+  
+}
+
+```
+
+```{r}
+
+fn_add_filters_summary <- function(tidy_summary_of_nodes, tree_model, ...) {
+  
+  # browser()
+  
+  fn_create_dplyr_filter <- function(filters_list){
+    
+    # filters_list <- ctree_fit %>% 
+    #   fn_tree_list() %>% 
+    #   map(pluck("filters")) %>% .[[15]]
+    if (any(is.na(filters_list))) {
+      dplyr_filter <- TRUE # get everything
+    } else if (filters_list %>% length() == 1) {
+      dplyr_filter <- filters_list %>% flatten_chr()
+    } else {
+      dplyr_filter <- filters_list %>% paste0(collapse = " & ")
+    }
+  
+    # # test case
+    # tidy_terminal_node_data %>%
+    #   filter_(dplyr_filter) %>%
+    #   head
+    
+    return(dplyr_filter)
+  }
+  
+  fn_create_segment_filter <- function(filters_list){
+    # filters_list <- ctree_fit %>% 
+    #   fn_tree_list() %>% 
+    #   map(pluck("filters")) %>% .[[15]]
+    if (any(is.na(filters_list))) {
+      segment_filter <- NA # get everything
+    } else if (filters_list %>% length() == 1) {
+      segment_filter <- filters_list %>% flatten_chr 
+      # %>% stringr::str_extract("[A-z]+") 
+    } else {
+      segment_filter <- filters_list %>% flatten_chr %>% strsplit(split = " ") %>% flatten_chr() %>%.[-length(.)] %>%
+        # stringr::str_extract("[A-z]+") %>%
+        unique %>% paste0(collapse = ", ") 
+    }
+  
+    # # test case
+    # tidy_terminal_node_data %>%
+    #   filter_(dplyr_filter) %>%
+    #   head
+    
+    return(segment_filter)
+  }
+  
+  fn_create_intervention_filter <- function(filters_list){
+    
+    # filters_list <- ctree_fit %>% 
+    #   fn_tree_list() %>% 
+    #   map(pluck("filters")) %>% .[[15]]
+    if (any(is.na(filters_list))) {
+      segment_filter <- NA # get everything
+    } else if (filters_list %>% length() == 1) {
+      segment_filter <- filters_list %>% flatten_chr %>% stringr::str_extract("[A-z]+") 
+    } else {
+      segment_filter <- filters_list %>% flatten_chr %>% strsplit(split = " ") %>% flatten_chr() %>% .[length(.)] %>% stringr::str_extract("[A-z]+") %>% unique %>% paste0(collapse = ", ")
+    }
+  
+    # # test case
+    # tidy_terminal_node_data %>%
+    #   filter_(dplyr_filter) %>%
+    #   head
+    
+    return(segment_filter)
+  }
+  
+  # node_filters <- 
+  #   ctree_fit %>% 
+  #   fn_tree_list() %>% 
+  #   map(pluck("filters"))
+node_filters <-
+  tree_model %>%
+  fn_tree_list() %>%
+  map(pluck("filters"))
+
+# browser()
+
+node_neighbour <-
+  tree_model %>%
+  fn_tree_list() %>%
+  map(pluck("parent"))
+  
+result <- 
+  tidy_summary_of_nodes %>% 
+    mutate(
+           dplyr_filter = Node_ID %>% map_chr(~ node_filters %>%
+                                            pluck(.x) %>%
+                                            fn_create_dplyr_filter()
+                                          ),
+           segment = Node_ID %>% map_chr(~ node_filters %>%
+                                            pluck(.x) %>%
+                                            fn_create_segment_filter()
+                                          ),
+           intervention = Node_ID %>% map_chr(~ node_filters %>%
+                                            pluck(.x) %>%
+                                            fn_create_intervention_filter()
+                                          ),
+           neighbour = Node_ID %>% map_dbl(~ node_neighbour %>%
+                                            pluck(.x) 
+                                          )
+           )
+  
+return(result)
+
+}
+```
+
+```{r}
+fn_generate_oppertunity_matrix <- function(oppertunity_set) {
+  # browser()
+add_nodes_desc <- 
+  oppertunity_set %>% 
+  group_by(neighbour) %>% 
+  mutate(nodes = Node_ID %>% paste0(collapse = ',')) 
+# %>% 
+  # select(neighbour,nodes) %>% 
+  # right_join(uniq_set, by = "neighbour")
+uniq_set <- 
+  add_nodes_desc %>% 
+    select(-data,dplyr_filter,-Inter_QR) %>%
+    # select(neighbour,contains("opportunity"),contains("median")) 
+    select(nodes,intervention,segment,matches("rel_|abs_"),neighbour) %>% 
+    unique()
+  
+  
+  return(uniq_set)
+  }
+
+```
+
+```{r}
+fn_extract_opportunities <- function(tidy_ctree_summary, increase = TRUE){
+
+  # browser()
+  
+  fn_max_min_range <- function(vec) {
+    
+    vec <- vec[!is.na(vec)]
+    
+    # browser()
+    if (vec %>% length() < 2) {
+      return(NA)
+    }
+    return(max(vec, na.rm = TRUE) - min(vec, na.rm = TRUE))
+  }
+  
+  # tidy_ctree_summary <-
+  # # cc
+  #   ctree_fit %>% 
+  #   fn_extract_tree_info(ctree_fit,train_data = modelling_set) %>% 
+  #   fn_extract_tree_summary(Y_variable_name = avg_period_days) %>% 
+  #   fn_add_filters_summary(node_filters = node_filters,tree_model = ctree_fit)
+  
+  name_median <- tidy_ctree_summary %>%
+    names %>%
+    grep("median",value = TRUE,x = .)
+  
+  
+  neighbor_opportunities_tbl <- 
+    tidy_ctree_summary %>% 
+    select(Node_ID,neighbour,name_median) %>% 
+    spread(key = Node_ID,value = !!(quo(name_median))) 
+  
+  # neighbor_opportunities_tbl['rel_neighbour_opportunity_val'] <- 
+  # browser()
+  neighbor_opportunities_tbl[paste0('rel_',name_median)] <- 
+    neighbor_opportunities_tbl %>% 
+      select(-neighbour) %>%
+      apply( MARGIN = 1, FUN = fn_max_min_range)
+  
+  neighbor_opportunities_tbl %<>% 
+    select(-matches('[0-9]+'))
+  
+result <- 
+  tidy_ctree_summary %>% 
+  left_join(neighbor_opportunities_tbl, by = "neighbour")
+
+fn_get_abs_opp <- function(data_, increase = TRUE) {
+  # browser()
+  
+  if (increase) {
+    
+  potens_pop_move <- 
+    data_[which(data_[name_median] == min(data_[name_median])),'sub_population'] %>% 
+    flatten_dbl()
+  
+  ideal_median_shift <- 
+    max(data_[name_median]) - min(data_[name_median])
+  
+  result <- potens_pop_move * ideal_median_shift 
+  } else {
+    
+  potens_pop_move <- 
+    data_[which(data_[name_median] == max(data_[name_median])),'sub_population'] %>% 
+    flatten_dbl()
+  
+  ideal_median_shift <- 
+    min(data_[name_median]) - max(data_[name_median])
+    
+  result <- potens_pop_move * ideal_median_shift * -1
+  }
+  
+  if (result %>% length > 1) {
+    result <- NA
+  }
+  
+  return(result)
+    
+}
+
+name_abs <- paste0('abs_',name_median)
+# mean_name <- paste0("mean_", quo_name(Y_variable_name_enquo))
+
+# browser
+
+result %<>%
+  group_by(neighbour) %>%
+  nest() %>% 
+  mutate(!!name_abs := data %>% map_dbl(~fn_get_abs_opp(.x,increase = increase))) %>% 
+  unnest(.drop = FALSE)
+# result %<>%
+#   group_by(neighbour) %>% 
+#   nest() %>% 
+#   mutate(data %>% map(~.x %>%
+#                         arrange( !!(quo(name_median)) ) %>% 
+#                         .[1,'sub_population'] * .x %>%
+#                         arrange( !!(quo(name_median)) ) %>% 
+#                         select( !!(quo(name_median)) ) %>% 
+#                         .[1,1]  ) 
+         # )
+
+  return(result)  
+  
+}
+```
+
+Define a master function for getting the opportunity matrix
+
+```{r}
+fn_oppertunity_matrix <- function(ctree_fit,train_data) {
+  ctree_fit %>% 
+  fn_extract_tree_info(ctree_fit,train_data = train_data) %>% 
+  fn_extract_tree_summary(Y_variable_name = avg_period_days) %>% 
+  fn_add_filters_summary(node_filters = node_filters,tree_model = ctree_fit) %>% 
+  fn_extract_opportunities(increase = FALSE) %>% 
+  fn_generate_oppertunity_matrix()
+}
+```
